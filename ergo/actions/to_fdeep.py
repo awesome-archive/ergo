@@ -740,6 +740,12 @@ def calculate_hash(model):
         hash_m.update(layer.name.encode('ascii'))
     return hash_m.hexdigest()
 
+def patch_layer(layer):
+    if layer["class_name"] != "Functional": return
+
+    layer["class_name"] = "Model"
+    for l in layer["config"]["layers"]:
+        patch_layer(l)
 
 def convert(in_path, out_path, no_tests=True, metadata=None):
     """Convert any Keras model to the frugally-deep model format."""
@@ -770,6 +776,9 @@ def convert(in_path, out_path, no_tests=True, metadata=None):
             meta_info = json.load(metadata_file)
         json_output.update(meta_info)
     json_output['architecture'] = json.loads(model.to_json())
+
+    for layer in json_output['architecture']['config']['layers']:
+        patch_layer(layer)
 
     json_output['image_data_format'] = K.image_data_format()
     for depth in range(1, 3, 1):
