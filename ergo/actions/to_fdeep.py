@@ -153,7 +153,7 @@ def are_embedding_layer_positions_ok_for_testing(model):
             if isinstance(layer, keras.layers.Embedding):
                 result += 1
         layer_type = type(layer).__name__
-        if layer_type in ['Model', 'Sequential']:
+        if layer_type in ['Model', 'Sequential', 'Functional']:
             result += count_embedding_layers(layer)
         return result
 
@@ -603,7 +603,7 @@ def get_all_weights(model):
     assert K.image_data_format() == 'channels_last'
     for layer in layers:
         layer_type = type(layer).__name__
-        if layer_type in ['Model', 'Sequential']:
+        if layer_type in ['Model', 'Sequential', 'Functional']:
             result = merge_two_disjunct_dicts(result, get_all_weights(layer))
         else:
             if hasattr(layer, 'data_format'):
@@ -679,7 +679,7 @@ def convert_sequential_to_model(model):
             model.inbound_nodes = inbound_nodes
     assert model.layers
     for i in range(len(model.layers)):
-        if type(model.layers[i]).__name__ in ['Model', 'Sequential']:
+        if type(model.layers[i]).__name__ in ['Model', 'Sequential', 'Functional']:
             model.layers[i] = convert_sequential_to_model(model.layers[i])
     return model
 
