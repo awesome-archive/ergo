@@ -2,19 +2,22 @@ import os
 import sys
 import json
 import re
+import gc
 import logging as log
-
+import tensorflow as tf
 import numpy as np
 import pandas as pd
 
 from sklearn.metrics import classification_report, confusion_matrix
 
-from keras.models import model_from_yaml, load_model
-from keras.utils.training_utils import multi_gpu_model
+from tensorflow.keras.models import model_from_yaml, load_model
+from tensorflow.python.keras.utils.multi_gpu_utils import multi_gpu_model
+from tensorflow.keras import backend as K
 
 from ergo.core.utils import serialize_classification_report, serialize_cm
 from ergo.core.logic import Logic
 from ergo.dataset import Dataset
+from ergo.core.multi_model import multi_model
 
 class Project(object):
     def __init__(self, path):
@@ -61,15 +64,12 @@ class Project(object):
             log.debug("loading model from %s ...", self.weights_path)
             self.model = load_model(self.weights_path)
             # https://github.com/keras-team/keras/issues/6462
-            self.model._make_predict_function()
+            self.model.make_predict_function()
 
         elif os.path.exists(self.model_path):
             log.debug("loading model from %s ...", self.model_path)
             with open(self.model_path, 'r') as fp:
                 self.model = model_from_yaml(fp.read())
-
-        else:
-            self.model = self.logic.builder(True)
 
         if os.path.exists(self.history_path):
             log.debug("loading history from %s ...", self.history_path)
@@ -86,7 +86,7 @@ class Project(object):
 
     def accuracy_for(self, X, Y, repo_as_dict = False):
         Y_tpred = np.argmax(self.model.predict(X), axis = 1)
-        repo    = classification_report(np.argmax(Y, axis = 1), Y_tpred, output_dict = repo_as_dict)
+        repo    = classification_report(np.argmax(Y, axis = 1), Y_tpred, output_dict = repo_as_dict, digits = 5)
         cm      = confusion_matrix(np.argmax(Y, axis = 1), Y_tpred)
         return repo, cm
 
@@ -97,6 +97,21 @@ class Project(object):
         return {'train': (train, tr_cm),
                 'test': (test, ts_cm),
                 'val': (val, val_cm)}
+
+    def reload_model(self):
+        K.clear_session()
+
+        if os.path.exists(self.weights_path):
+            self.model = load_model(self.weights_path)
+            # https://github.com/keras-team/keras/issues/6462
+            self.model._make_predict_function()
+        elif os.path.exists(self.model_path):
+            with open(self.model_path, 'r') as fp:
+                self.model = model_from_yaml(fp.read())
+        else:
+            self.model = self.logic.builder(True)
+
+        gc.collect()
 
     def _save_model(self):
         log.info("updating %s ...", self.model_path)
@@ -126,8 +141,8 @@ class Project(object):
         stats = {}
         for who in self.what:
             report, cm = self.accu[who]
-            stats[who] = { 
-                'accuracy': serialize_classification_report(report), 
+            stats[who] = {
+                'accuracy': serialize_classification_report(report),
                 'cm': serialize_cm(cm)
             }
         json.dump(stats, where)
@@ -158,17 +173,27 @@ class Project(object):
         # async datasets saver might be running, wait before training
         self.dataset.saver.wait()
 
-        # train
-        if self.model is None:
-            self.model = self.logic.builder(True)
-
-        to_train = self.model
+        strategy = tf.distribute.MirroredStrategy()
         if gpus > 1:
             log.info("training with %d GPUs", gpus)
-            to_train = multi_gpu_model(self.model, gpus=gpus)
+            physical_devices = tf.config.list_physical_devices('GPU')
+            tf.config.set_visible_devices(physical_devices[ 0:gpus ], 'GPU')
+            strategy = tf.distribute.MirroredStrategy()
+
+        with strategy.scope():
+            # train            
+            if self.model is None:
+                self.model = self.logic.builder(True)
+            to_train = multi_model(self.model, None)
+
+        if gpus > 1:
+            with strategy.scope():
+                to_train = multi_model(self.model, multi_gpu_model(self.model, gpus=gpus))
+
 
         past = self.history.copy() if self.history is not None else None
-        present = self.logic.trainer(to_train, self.dataset).history
+        with strategy.scope():
+            present = self.logic.trainer(to_train, self.dataset).history
 
         if past is None:
             self.history = present
@@ -188,7 +213,7 @@ class Project(object):
         self._save_history()
         # save model accuracy statistics
         self._save_stats()
-          
+
     def view(self, img_only = False):
         import ergo.views as views
 

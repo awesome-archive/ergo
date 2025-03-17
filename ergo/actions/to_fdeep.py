@@ -8,11 +8,11 @@ import json
 import sys
 import argparse
 
-import keras
+import tensorflow.keras as keras
 import numpy as np
-from keras import backend as K
-from keras.layers import Input
-from keras.models import Model, load_model
+from tensorflow.keras import backend as K
+from tensorflow.keras.layers import Input
+from tensorflow.keras.models import Model, load_model
 
 import logging as log
 from ergo.project import Project
@@ -87,7 +87,7 @@ def arr_as_arr5(arr):
 
 def get_layer_input_shape_shape5(layer):
     """Convert a keras shape to an fdeep shape"""
-    shape = layer.input_shape[1:]
+    shape = layer.input_shape[0][1:]
     depth = len(shape)
     if depth == 1:
         return (1, 1, 1, 1, shape[0])
@@ -153,7 +153,7 @@ def are_embedding_layer_positions_ok_for_testing(model):
             if isinstance(layer, keras.layers.Embedding):
                 result += 1
         layer_type = type(layer).__name__
-        if layer_type in ['Model', 'Sequential']:
+        if layer_type in ['Model', 'Sequential', 'Functional']:
             result += count_embedding_layers(layer)
         return result
 
@@ -603,7 +603,7 @@ def get_all_weights(model):
     assert K.image_data_format() == 'channels_last'
     for layer in layers:
         layer_type = type(layer).__name__
-        if layer_type in ['Model', 'Sequential']:
+        if layer_type in ['Model', 'Sequential', 'Functional']:
             result = merge_two_disjunct_dicts(result, get_all_weights(layer))
         else:
             if hasattr(layer, 'data_format'):
@@ -663,23 +663,23 @@ def convert_sequential_to_model(model):
         else:
             raise ValueError('can not get (_)inbound_nodes from model')
         # Since Keras 2.2.0
-        if model.model == model:
-            input_layer = Input(batch_shape=model.layers[0].input_shape)
-            prev_layer = input_layer
-            for layer in model.layers:
-                prev_layer = layer(prev_layer)
-            funcmodel = Model([input_layer], [prev_layer])
-            model = funcmodel
-        else:
-            model = model.model
-        set_model_name(model, name)
+        #if model.model == model:
+        input_layer = Input(batch_shape=model.layers[0].input_shape)
+        prev_layer = input_layer
+        for layer in model.layers:
+            prev_layer = layer(prev_layer)
+        funcmodel = Model([input_layer], [prev_layer])
+        model = funcmodel
+        #else:
+        #    model = model.model
+        #set_model_name(model, name)
         if hasattr(model, '_inbound_nodes'):
             model._inbound_nodes = inbound_nodes
         elif hasattr(model, 'inbound_nodes'):
             model.inbound_nodes = inbound_nodes
     assert model.layers
     for i in range(len(model.layers)):
-        if type(model.layers[i]).__name__ in ['Model', 'Sequential']:
+        if type(model.layers[i]).__name__ in ['Model', 'Sequential', 'Functional']:
             model.layers[i] = convert_sequential_to_model(model.layers[i])
     return model
 
@@ -740,10 +740,20 @@ def calculate_hash(model):
         hash_m.update(layer.name.encode('ascii'))
     return hash_m.hexdigest()
 
+def patch_layer(layer):
+    if layer["class_name"] != "Functional": return
 
-def convert(in_path, out_path, no_tests=False):
+    layer["class_name"] = "Model"
+    for l in layer["config"]["layers"]:
+        patch_layer(l)
+
+def convert(in_path, out_path, no_tests=True, metadata=None):
     """Convert any Keras model to the frugally-deep model format."""
-
+    # We are defaulting the no-tests flag since
+    # there is a problem with the test generation
+    # due to different keras versions models.
+    # This whole file will be updated soon
+    no_tests = True
     assert K.backend() == "tensorflow"
     assert K.floatx() == "float32"
     assert K.image_data_format() == 'channels_last'
@@ -761,7 +771,14 @@ def convert(in_path, out_path, no_tests=False):
     test_data = None if no_tests else gen_test_data(model)
 
     json_output = {}
+    if metadata is not None:
+        with open(metadata, 'r') as metadata_file:
+            meta_info = json.load(metadata_file)
+        json_output.update(meta_info)
     json_output['architecture'] = json.loads(model.to_json())
+
+    for layer in json_output['architecture']['config']['layers']:
+        patch_layer(layer)
 
     json_output['image_data_format'] = K.image_data_format()
     for depth in range(1, 3, 1):
@@ -797,6 +814,8 @@ def parse_args(argv):
     parser.add_argument("path", help="Path of the project containing the model.")
     parser.add_argument("--no-tests", dest="no_tests", action="store_true", default=False,
             help="Don't generate tests in fdeep")
+    parser.add_argument("--metadata", dest="metadata", action="store", required=False,
+            help="Add metadata to fdeep model (json file)")
     args = parser.parse_args(argv)
     return args
 
@@ -811,5 +830,5 @@ def action_to_fdeep(argc, argv):
         log.error("no trained model found for this project")
         quit()
 
-    convert(prj.weights_path, prj.fdeep_path, args.no_tests)
+    convert(prj.weights_path, prj.fdeep_path, args.no_tests, args.metadata)
 
